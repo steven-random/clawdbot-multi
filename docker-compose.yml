@@ -1,0 +1,77 @@
+version: "3.8"
+
+networks:
+  clawdbot_net:
+    driver: bridge
+
+volumes:
+  redis_data:
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: clawdbot_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - clawdbot_net
+
+  slack_gateway:
+    build:
+      context: ./slack_gateway
+      dockerfile: Dockerfile
+    container_name: clawdbot_slack_gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - clawdbot_net
+    volumes:
+      - ./slack_gateway:/app
+
+  agent_email:
+    build:
+      context: ./agents/email
+      dockerfile: Dockerfile
+    container_name: clawdbot_agent_email
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AGENT_ID: email
+      AGENT_NAME: "Email Agent"
+      SLACK_CHANNEL_NAME: email-agent
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - clawdbot_net
+    volumes:
+      - ~/.codex:/root/.codex:ro
+      - ./agents/email:/app
+      - ./shared:/shared
+
+  agent_stock:
+    build:
+      context: ./agents/stock
+      dockerfile: Dockerfile
+    container_name: clawdbot_agent_stock
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AGENT_ID: stock
+      AGENT_NAME: "Stock Analyst Agent"
+      SLACK_CHANNEL_NAME: stock-analyst-agent
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - clawdbot_net
+    volumes:
+      - ~/.codex:/root/.codex:ro
+      - ./agents/stock:/app
+      - ./shared:/shared
