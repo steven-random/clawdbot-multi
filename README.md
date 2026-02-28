@@ -1,238 +1,237 @@
-# 🤖 ClawdBot — Multi-Agent System (Slack-Controlled)
+# ClawdBot 多Agent系统
 
-A production-ready, locally-hosted multi-agent AI system powered by Claude, controlled entirely through Slack. Each agent runs in its own Docker container and responds only in its dedicated Slack channel.
+基于 OpenAI Codex CLI + Slack 的本地多Agent AI系统。每个Agent独立运行在Docker容器里，通过专属Slack频道控制。
 
----
+## 系统架构
 
-## Architecture
+    Slack频道
+        |
+    Slack Gateway（接收消息，路由到对应Agent）
+        |
+      Redis（消息队列）
+      /         \
+  Email Agent   Stock Agent
+        |
+    Codex CLI（GPT-5-Codex）
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Slack Workspace                          │
-│  #agent-code  #agent-data  #agent-search  #agent-docs          │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │ Socket Mode (WebSocket)
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Slack Gateway (Bolt)                          │
-│   • Receives all messages                                       │
-│   • Maps channel → agent                                        │
-│   • Pushes tasks to Redis                                       │
-│   • Posts results back to Slack                                 │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │ Redis Pub/Sub
-          ┌─────────────┼──────────────┬──────────────┐
-          ▼             ▼              ▼              ▼
-   ┌────────────┐ ┌───────────┐ ┌──────────────┐ ┌──────────────┐
-   │ Code Agent │ │ Data Agent│ │ Search Agent │ │  Docs Agent  │
-   │            │ │           │ │              │ │              │
-   │ run_python │ │  run_sql  │ │  web_search  │ │  read_file   │
-   │  run_bash  │ │list_tables│ │  fetch_page  │ │  write_file  │
-   │ write_file │ │desc_table │ │              │ │  list_files  │
-   └────────────┘ └─────┬─────┘ └──────────────┘ └──────────────┘
-                        │
-                 ┌──────▼──────┐
-                 │  PostgreSQL  │
-                 └─────────────┘
-```
+## 当前Agent列表
 
----
+| Agent | Slack频道 | 职责 |
+|---|---|---|
+| Email Agent | #email-agent | Gmail邮箱管理 |
+| Stock Agent | #stock-analyst-agent | 美股分析 |
 
-## Quick Start
+## 环境要求
 
-### 1. Clone / copy this project to your Ubuntu server
+- Ubuntu 20.04+
+- Docker 20+
+- docker-compose 1.29+
+- Node.js 18+（用于Codex CLI）
+- ChatGPT Plus/Pro账号（用于Codex CLI登录）
 
-```bash
-# Copy the clawdbot folder to your server
-scp -r clawdbot/ user@your-server:~/clawdbot
-cd ~/clawdbot
-```
+## 部署步骤
 
-### 2. Create your Slack App
+### 1. 克隆代码
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → From Scratch
-2. Name it `ClawdBot`, pick your workspace
-3. **Socket Mode** → Enable Socket Mode → Generate App Token (scope: `connections:write`) → Save as `SLACK_APP_TOKEN`
-4. **OAuth & Permissions** → Bot Token Scopes:
-   - `channels:read`
-   - `chat:write`
-   - `groups:read`
-   - `im:read`
-   - `mpim:read`
-5. **Event Subscriptions** → Enable → Subscribe to bot events:
-   - `message.channels`
-   - `message.groups`
-6. Install app to workspace → copy **Bot User OAuth Token** → `SLACK_BOT_TOKEN`
-7. **Basic Information** → **Signing Secret** → `SLACK_SIGNING_SECRET`
+    git clone https://github.com/steven-random/clawdbot-multi.git
+    cd clawdbot-multi
 
-### 3. Create Slack Channels & Invite the Bot
+### 2. 安装 Codex CLI 并登录
 
-Create these channels in Slack (exact names matter):
-- `#agent-code`
-- `#agent-data`
-- `#agent-search`
-- `#agent-docs`
+    npm install -g @openai/codex
+    codex login
 
-In each channel, type: `/invite @ClawdBot`
+### 3. 配置环境变量
 
-### 4. Configure environment
+    cp .env.example .env
+    nano .env
 
-```bash
-cp .env.example .env
-nano .env   # Fill in your keys
-```
+需要填写：
+- SLACK_BOT_TOKEN
+- SLACK_APP_TOKEN
+- SLACK_SIGNING_SECRET
 
-### 5. Deploy
+### 4. 在Slack创建频道并邀请Bot
 
-```bash
-chmod +x scripts/setup.sh
-./scripts/setup.sh
-```
+在每个Agent频道里执行：
 
-That's it! Send a message in any agent channel and ClawdBot will respond.
+    /invite @ClawdBot
 
----
+### 5. 启动
 
-## Usage Examples
+    docker-compose up -d --build
 
-### #agent-code
-```
-Write a Python function that parses a CSV file and returns a list of dicts
-```
-```
-Debug this code: [paste code]
-```
-```
-Run this script and show me the output: print(sum(range(100)))
-```
+### 6. 验证运行
 
-### #agent-data
-```
-List all tables in the database
-```
-```
-Show me the top 5 rows from sample_metrics
-```
-```
-Write a SQL query to find average values grouped by metric_name
-```
+    docker-compose ps
 
-### #agent-search
-```
-Search for the latest news about AI agents
-```
-```
-Summarize this page: https://example.com/article
-```
+所有服务状态应该是 Up。
 
-### #agent-docs
-```
-Create a README for a FastAPI project
-```
-```
-List all files in my workspace
-```
-```
-Summarize this text: [paste long text]
-```
+## 日常维护命令
 
----
+查看所有容器状态：
 
-## Management Commands
+    docker-compose ps
 
-```bash
-# View all logs
-docker compose logs -f
+查看某个Agent日志：
 
-# View a specific agent's logs
-docker compose logs -f agent_code
+    docker-compose logs -f agent_email
+    docker-compose logs -f agent_stock
 
-# Restart a single agent (no downtime for others)
-docker compose restart agent_search
+重启所有服务：
 
-# Stop everything
-docker compose down
+    docker-compose restart
 
-# Rebuild after code changes
-docker compose up -d --build agent_code
+重启某个Agent：
 
-# Update all agents
-docker compose up -d --build
-```
+    docker-compose restart agent_email
 
----
+代码更新后重新部署：
 
-## Project Structure
+    git pull
+    docker-compose down
+    docker-compose up -d --build
 
-```
-clawdbot/
-├── docker-compose.yml          # All services defined here
-├── .env.example                # Copy to .env and fill in
-├── shared/
-│   └── base_agent.py           # Base class all agents inherit
-├── slack_gateway/
-│   ├── app.py                  # Slack Bolt app (Socket Mode)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── agents/
-│   ├── code/                   # Code / Dev Agent
-│   │   ├── agent.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── data/                   # Data / DB Agent
-│   ├── search/                 # Web Search Agent
-│   └── docs/                   # File / Docs Agent
-├── nginx/
-│   └── nginx.conf
-└── scripts/
-    ├── setup.sh                # One-command installer
-    └── init_db.sql             # PostgreSQL schema
-```
+## 添加新Agent
 
----
+### 第一步：创建Agent目录
 
-## Adding a New Agent
+    cp -r agents/email agents/myagent
 
-1. Create `agents/myagent/` directory
-2. Create `agent.py` extending `BaseAgent`:
+### 第二步：修改 agents/myagent/agent.py
 
-```python
-from base_agent import BaseAgent
+把 SYSTEM_PROMPTS 里加入新Agent的角色描述：
 
-class MyAgent(BaseAgent):
+    SYSTEM_PROMPTS = {
+        "email": "You are an AI email assistant...",
+        "stock": "You are a US stock market analyst...",
+        "myagent": "你对新Agent的描述",
+    }
 
-    @property
-    def system_prompt(self) -> str:
-        return "You are the MyAgent..."
+### 第三步：在 docker-compose.yml 添加新服务
 
-    async def get_tools(self) -> list[dict]:
-        return []  # Add tools here
+在 services 末尾加入：
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(MyAgent().run())
-```
+    agent_myagent:
+      build:
+        context: ./agents/myagent
+        dockerfile: Dockerfile
+      container_name: clawdbot_agent_myagent
+      restart: unless-stopped
+      env_file: .env
+      environment:
+        AGENT_ID: myagent
+        AGENT_NAME: "My Agent"
+        SLACK_CHANNEL_NAME: my-agent-channel
+        REDIS_URL: redis://redis:6379
+        CODEX_MODEL: gpt-5-codex
+      depends_on:
+        - redis
+      networks:
+        - clawdbot_net
+      volumes:
+        - ~/.codex:/root/.codex:ro
+        - ./agents/myagent:/app
+        - ./shared:/shared
 
-3. Add to `docker-compose.yml`:
+### 第四步：在 .env 添加频道名
 
-```yaml
-agent_myagent:
-  build: ./agents/myagent
-  environment:
-    AGENT_ID: myagent
-    AGENT_NAME: "My Agent"
-    SLACK_CHANNEL_NAME: agent-myagent
-```
+    SLACK_CHANNEL_MYAGENT=my-agent-channel
 
-4. Create the `#agent-myagent` Slack channel and invite `@ClawdBot`
-5. `docker compose up -d --build agent_myagent`
+### 第五步：在Slack创建频道
 
----
+创建 #my-agent-channel，然后执行：
 
-## Security Notes
+    /invite @ClawdBot
 
-- The Code Agent runs scripts inside Docker (sandboxed)
-- The Data Agent blocks destructive SQL (DROP, TRUNCATE, DELETE)
-- The Docs Agent restricts file access to `/workspace` only
-- All containers share an internal network — nothing is exposed except port 80 (nginx)
-- Keep your `.env` file private — never commit it to git
+### 第六步：启动新Agent
+
+    docker-compose up -d --build agent_myagent
+
+## 删除Agent
+
+### 第一步：停止并删除容器
+
+    docker-compose stop agent_email
+    docker-compose rm -f agent_email
+
+### 第二步：删除代码目录
+
+    rm -rf agents/email
+
+### 第三步：从 docker-compose.yml 删除对应的 service 块
+
+用编辑器打开并删除对应段落：
+
+    nano docker-compose.yml
+
+### 第四步：在Slack删除或存档对应频道
+
+## 服务器宕机恢复
+
+### 情况一：服务器重启后自动恢复
+
+所有容器已设置 restart: unless-stopped，服务器重启后Docker会自动重启容器。
+
+验证：
+
+    docker-compose ps
+
+### 情况二：容器崩溃
+
+查看哪个容器有问题：
+
+    docker-compose ps
+
+查看错误日志：
+
+    docker-compose logs --tail=50 agent_email
+
+重启出问题的容器：
+
+    docker-compose restart agent_email
+
+### 情况三：全部重启
+
+    cd ~/clawdbot
+    docker-compose down
+    docker-compose up -d
+
+### 情况四：Codex登录过期
+
+如果Agent回复"authentication failed"或无响应：
+
+    codex login
+
+重新登录后重启Agent：
+
+    docker-compose restart agent_email agent_stock
+
+### 情况五：Redis数据丢失
+
+Redis重启后消息队列会清空，但不影响功能，Agent会重新监听。
+
+如果Redis无法启动：
+
+    docker-compose logs redis
+    docker volume rm clawdbot_redis_data
+    docker-compose up -d redis
+
+### 情况六：完全重新部署
+
+    cd ~/clawdbot
+    docker-compose down
+    docker rmi clawdbot_slack_gateway clawdbot_agent_email clawdbot_agent_stock
+    docker-compose up -d --build
+
+## 环境变量说明
+
+| 变量 | 说明 |
+|---|---|
+| SLACK_BOT_TOKEN | Slack Bot Token（xoxb-开头） |
+| SLACK_APP_TOKEN | Slack App Token（xapp-开头） |
+| SLACK_SIGNING_SECRET | Slack签名密钥 |
+| SLACK_CHANNEL_EMAIL | Email Agent的Slack频道名 |
+| SLACK_CHANNEL_STOCK | Stock Agent的Slack频道名 |
+| CODEX_MODEL | 使用的Codex模型（默认gpt-5-codex） |
+| REDIS_URL | Redis连接地址 |
