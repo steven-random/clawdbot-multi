@@ -27,6 +27,10 @@ class BaseAgent(ABC):
       1. Subscribes to Redis channel  f"tasks:{agent_id}"
       2. On each message, calls  handle_task(task)  (override in subclass)
       3. Posts result back to   f"results:{task_id}"
+
+    Memory:
+      Each agent has isolated long-term memory stored in Redis under the key
+      f"agent_memory:{agent_id}". No local files or extra volume mounts needed.
     """
 
     def __init__(self):
@@ -39,6 +43,72 @@ class BaseAgent(ABC):
 
         self.claude = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.log = logging.getLogger(self.agent_name)
+
+        # In-memory cache; loaded from Redis at the start of run()
+        self.memory: dict = {"entries": [], "updated_at": None}
+        self._redis: aioredis.Redis | None = None
+
+    # ── Memory management ──────────────────────────────────
+
+    @property
+    def _memory_key(self) -> str:
+        return f"agent_memory:{self.agent_id}"
+
+    async def _load_memory(self):
+        """Load memory from Redis into self.memory."""
+        data = await self._redis.get(self._memory_key)
+        if data:
+            try:
+                self.memory = json.loads(data)
+                self.log.info(f"Loaded memory ({len(self.memory.get('entries', []))} entries)")
+            except (json.JSONDecodeError, Exception) as e:
+                self.log.warning(f"Failed to parse memory: {e}")
+
+    async def _save_memory(self):
+        """Persist self.memory to Redis."""
+        self.memory["updated_at"] = datetime.utcnow().isoformat()
+        await self._redis.set(
+            self._memory_key,
+            json.dumps(self.memory, ensure_ascii=False),
+        )
+
+    async def remember(self, content: str, category: str = "general"):
+        """Add a memory entry and persist."""
+        self.memory["entries"].append({
+            "content": content,
+            "category": category,
+            "created_at": datetime.utcnow().isoformat(),
+        })
+        # Keep last 200 entries to prevent unbounded growth
+        self.memory["entries"] = self.memory["entries"][-200:]
+        await self._save_memory()
+        self.log.info(f"Saved memory [{category}]: {content[:60]}…")
+
+    async def forget(self, keyword: str) -> int:
+        """Remove memory entries containing keyword. Returns count removed."""
+        before = len(self.memory["entries"])
+        self.memory["entries"] = [
+            e for e in self.memory["entries"]
+            if keyword.lower() not in e["content"].lower()
+        ]
+        removed = before - len(self.memory["entries"])
+        if removed:
+            await self._save_memory()
+        return removed
+
+    def get_memory_context(self) -> str:
+        """Format memory entries for injection into system prompt."""
+        entries = self.memory.get("entries", [])
+        if not entries:
+            return ""
+        lines = []
+        for e in entries:
+            cat = e.get("category", "general")
+            lines.append(f"- [{cat}] {e['content']}")
+        return (
+            "\n\n## Your Memory (learned from past interactions)\n"
+            + "\n".join(lines)
+        )
 
     # ── Override these in subclass ───────────────────────────
 
@@ -66,10 +136,13 @@ class BaseAgent(ABC):
         Calls Claude with optional tool-use loop.
         Keeps going until Claude stops calling tools.
         """
+        # Inject memory context into system prompt
+        system = self.system_prompt + self.get_memory_context()
+
         kwargs = dict(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=self.system_prompt,
+            system=system,
             messages=messages,
         )
         if tools:
@@ -110,8 +183,65 @@ class BaseAgent(ABC):
         return "\n".join(full_text)
 
     async def handle_tool_call(self, name: str, input_: dict) -> str:
-        """Override in subclass to handle tool calls."""
+        """Override in subclass to handle tool calls. Built-in memory tools are handled here."""
+        if name == "save_memory":
+            await self.remember(input_["content"], input_.get("category", "general"))
+            return "Memory saved."
+        if name == "recall_memory":
+            keyword = input_.get("keyword", "")
+            entries = self.memory.get("entries", [])
+            if keyword:
+                entries = [e for e in entries if keyword.lower() in e["content"].lower()]
+            if not entries:
+                return "No matching memories found."
+            return "\n".join(f"[{e.get('category','general')}] {e['content']}" for e in entries[-20:])
+        if name == "forget_memory":
+            removed = await self.forget(input_["keyword"])
+            return f"Removed {removed} memory entries."
         return f"Tool '{name}' not implemented."
+
+    def _memory_tool_defs(self) -> list[dict]:
+        """Built-in tool definitions for memory management."""
+        return [
+            {
+                "name": "save_memory",
+                "description": "Save important information to your long-term memory. Use this to remember user preferences, key facts, or anything worth recalling in future conversations.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "What to remember"},
+                        "category": {
+                            "type": "string",
+                            "description": "Category tag, e.g. 'user_preference', 'fact', 'instruction'",
+                            "default": "general",
+                        },
+                    },
+                    "required": ["content"],
+                },
+            },
+            {
+                "name": "recall_memory",
+                "description": "Search your long-term memory for relevant past information.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {"type": "string", "description": "Keyword to search for (empty string returns recent memories)"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "forget_memory",
+                "description": "Remove memory entries containing a keyword.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {"type": "string", "description": "Keyword to match entries to remove"},
+                    },
+                    "required": ["keyword"],
+                },
+            },
+        ]
 
     async def process_task(self, task: dict) -> str:
         """Main entry point for a task."""
@@ -123,7 +253,9 @@ class BaseAgent(ABC):
             messages = history + messages
 
         tools = await self.get_tools()
-        result = await self.call_claude(messages, tools or None)
+        # Merge agent-specific tools with built-in memory tools
+        all_tools = self._memory_tool_defs() + (tools or [])
+        result = await self.call_claude(messages, all_tools or None)
         result = await self.post_process(result, task)
         return result
 
@@ -131,9 +263,12 @@ class BaseAgent(ABC):
 
     async def run(self):
         self.log.info(f"Starting — listening on tasks:{self.agent_id}")
-        redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        self._redis = aioredis.from_url(self.redis_url, decode_responses=True)
 
-        async with redis.pubsub() as ps:
+        # Load this agent's memory from Redis
+        await self._load_memory()
+
+        async with self._redis.pubsub() as ps:
             await ps.subscribe(f"tasks:{self.agent_id}")
 
             async for message in ps.listen():
@@ -146,14 +281,14 @@ class BaseAgent(ABC):
                     self.log.info(f"Received task {task_id}: {task['text'][:60]}…")
 
                     # Post "thinking" ack
-                    await redis.publish(
+                    await self._redis.publish(
                         f"results:{task_id}",
                         json.dumps({"status": "thinking", "agent": self.agent_id}),
                     )
 
                     result = await self.process_task(task)
 
-                    await redis.publish(
+                    await self._redis.publish(
                         f"results:{task_id}",
                         json.dumps({
                             "status": "done",
@@ -169,7 +304,7 @@ class BaseAgent(ABC):
 
                 except Exception as e:
                     self.log.exception(f"Error processing task: {e}")
-                    await redis.publish(
+                    await self._redis.publish(
                         f"results:{task_id}",
                         json.dumps({
                             "status": "error",

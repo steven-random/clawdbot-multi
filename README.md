@@ -8,7 +8,7 @@
         |
     Slack Gateway（接收消息，路由到对应Agent）
         |
-      Redis（消息队列）
+      Redis（消息队列 + 各Agent独立记忆存储）
       /         \
   Email Agent   Stock Agent
         |
@@ -20,6 +20,27 @@
 |---|---|---|
 | Email Agent | #email-agent | Gmail邮箱管理 |
 | Stock Agent | #stock-analyst-agent | 美股分析 |
+
+## Agent记忆系统
+
+每个Agent拥有独立的长期记忆，存储在Redis中：
+
+    agent_memory:email   → Email Agent 的记忆
+    agent_memory:stock   → Stock Agent 的记忆
+
+Agent会在对话中自动存取记忆（通过 `save_memory` / `recall_memory` / `forget_memory` 工具）。记忆会注入到每次对话的系统提示中，实现跨会话的上下文保持。
+
+查看某个Agent的记忆：
+
+    docker exec clawdbot_redis redis-cli get agent_memory:email
+
+查看所有Agent的记忆key：
+
+    docker exec clawdbot_redis redis-cli keys "agent_memory:*"
+
+清除某个Agent的记忆：
+
+    docker exec clawdbot_redis redis-cli del agent_memory:email
 
 ## 环境要求
 
@@ -134,6 +155,8 @@
         - ./agents/myagent:/app
         - ./shared:/shared
 
+> 注意：无需为新Agent创建任何本地目录或额外挂载volume，记忆会自动存入Redis。
+
 ### 第四步：在 .env 添加频道名
 
     SLACK_CHANNEL_MYAGENT=my-agent-channel
@@ -165,7 +188,11 @@
 
     nano docker-compose.yml
 
-### 第四步：在Slack删除或存档对应频道
+### 第四步（可选）：清除该Agent的记忆
+
+    docker exec clawdbot_redis redis-cli del agent_memory:email
+
+### 第五步：在Slack删除或存档对应频道
 
 ## 服务器宕机恢复
 
@@ -193,7 +220,7 @@
 
 ### 情况三：全部重启
 
-    cd ~/clawdbot
+    cd ~/clawdbot-multi
     docker-compose down
     docker-compose up -d
 
@@ -207,19 +234,20 @@
 
     docker-compose restart agent_email agent_stock
 
-### 情况五：Redis数据丢失
+### 情况五：Redis数据问题
 
-Redis重启后消息队列会清空，但不影响功能，Agent会重新监听。
+Redis已开启AOF持久化（`--appendonly yes`），重启后记忆数据不会丢失。
 
 如果Redis无法启动：
 
     docker-compose logs redis
-    docker volume rm clawdbot_redis_data
     docker-compose up -d redis
+
+> 警告：执行 `docker volume rm clawdbot_redis_data` 会永久删除所有Agent的记忆，请谨慎操作。
 
 ### 情况六：完全重新部署
 
-    cd ~/clawdbot
+    cd ~/clawdbot-multi
     docker-compose down
     docker rmi clawdbot_slack_gateway clawdbot_agent_email clawdbot_agent_stock
     docker-compose up -d --build
