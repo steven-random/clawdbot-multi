@@ -16,12 +16,14 @@ if TYPE_CHECKING:
     from capabilities.base import Capability
 
 from capabilities.database import DatabaseCapability
+from capabilities.email import EmailCapability
 from capabilities.minneru import MinneruCapability
 
 log = logging.getLogger(__name__)
 
 # ── Add new capabilities here ──────────────────────────────────────────────
 REGISTRY: dict[str, type["Capability"]] = {
+    EmailCapability.NAME:    EmailCapability,
     MinneruCapability.NAME:  MinneruCapability,
     DatabaseCapability.NAME: DatabaseCapability,
 }

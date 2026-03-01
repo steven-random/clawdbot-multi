@@ -135,9 +135,16 @@ class BaseAgent(ABC):
         """
         Return Anthropic-format tool definitions for this agent.
         By default returns the definitions from loaded capabilities.
+        Supports both single-tool (DEFINITION) and multi-tool (DEFINITIONS) capabilities.
         Override in subclass to add agent-specific tools on top.
         """
-        return [cap.DEFINITION for cap in self._capabilities]
+        tools = []
+        for cap in self._capabilities:
+            if hasattr(cap, "DEFINITIONS"):
+                tools.extend(cap.DEFINITIONS)
+            else:
+                tools.append(cap.DEFINITION)
+        return tools
 
     async def pre_process(self, task: dict) -> dict:
         """Optional hook: enrich/validate task before sending to Claude."""
@@ -207,10 +214,11 @@ class BaseAgent(ABC):
           2. Built-in memory tools (save_memory, recall_memory, forget_memory)
           3. Subclass overrides (call super() to reach this fallback)
         """
-        # 1. Try capabilities
+        # 1. Try capabilities (supports single DEFINITION and multi DEFINITIONS)
         for cap in self._capabilities:
-            if cap.DEFINITION["name"] == name:
-                return await cap.run(input_)
+            defs = cap.DEFINITIONS if hasattr(cap, "DEFINITIONS") else [cap.DEFINITION]
+            if any(d["name"] == name for d in defs):
+                return await cap.run({"_tool": name, **input_})
 
         # 2. Built-in memory tools
         if name == "save_memory":

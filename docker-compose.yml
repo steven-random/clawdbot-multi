@@ -47,7 +47,7 @@ services:
       AGENT_NAME: "Email Agent"
       SLACK_CHANNEL_NAME: email-agent
       REDIS_URL: redis://redis:6379
-      AGENT_CAPABILITIES: minneru   # comma-separated: minneru,database,...
+      AGENT_CAPABILITIES: email,minneru   # comma-separated: email,minneru,database,...
     depends_on:
       - redis
     networks:
