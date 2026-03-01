@@ -4,79 +4,86 @@
 
 ## 系统架构
 
-    Slack频道
-        |
-    Slack Gateway（接收消息，路由到对应Agent）
-        |
-      Redis（消息队列 + 各Agent独立记忆存储）
-      /         \
-  Email Agent   Stock Agent
-        |
-    Codex CLI（GPT-5-Codex）
+```
+Slack频道 #email-agent          Slack频道 #stock-analyst-agent
+         \                                /
+          └──────── Slack Gateway ────────┘
+                         │
+                       Redis
+                    （消息路由 + 独立记忆存储）
+                    /           \
+             Email Agent      Stock Agent
+             （Docker容器）    （Docker容器）
+                  │                 │
+            Codex CLI           Codex CLI
+          （gpt-5-codex）      （gpt-5-codex）
+```
+
+## Agent如何做到互相隔离
+
+这是系统设计的核心。Agent之间完全独立，互不影响，通过以下四层机制实现：
+
+### 1. 消息路由隔离 — Redis频道
+
+Slack Gateway 根据消息来自哪个 Slack 频道，将任务发布到对应的 Redis 频道：
+
+```
+#email-agent  消息  →  Redis 发布到  tasks:email
+#stock-analyst-agent 消息  →  Redis 发布到  tasks:stock
+```
+
+每个 Agent 只订阅自己的频道（`tasks:{agent_id}`），绝对不会收到发给其他 Agent 的消息。
+
+### 2. 记忆隔离 — Redis Key 命名空间
+
+每个 Agent 的长期记忆存储在独立的 Redis Key 下：
+
+```
+agent_memory:email   →  只有 Email Agent 读写
+agent_memory:stock   →  只有 Stock Agent 读写
+```
+
+Agent 只操作自己的 Key，不存在任何跨Agent读取记忆的机制。
+
+### 3. 能力隔离 — 环境变量控制
+
+每个 Agent 容器通过 `AGENT_CAPABILITIES` 环境变量声明自己能用哪些工具。
+只有被声明的能力才会被加载，其他能力的代码甚至不会被 import：
+
+```yaml
+agent_email:
+  environment:
+    AGENT_CAPABILITIES: email,minneru   # Email Agent 可以操作邮箱、转换PDF
+
+agent_stock:
+  environment:
+    AGENT_CAPABILITIES: minneru         # Stock Agent 只能转换PDF，不能碰邮箱
+```
+
+### 4. 进程隔离 — 独立Docker容器
+
+每个 Agent 运行在完全独立的 Docker 容器里，独立的文件系统、网络命名空间、进程空间。一个 Agent 崩溃不会影响其他 Agent。
+
+---
 
 ## 当前Agent列表
 
-| Agent | Slack频道 | 职责 |
-|---|---|---|
-| Email Agent | #email-agent | Gmail邮箱管理 |
-| Stock Agent | #stock-analyst-agent | 美股分析 |
+| Agent | Slack频道 | 职责 | 能力 |
+|---|---|---|---|
+| Email Agent | #email-agent | Yahoo邮箱管理（收发读删） | `email`, `minneru` |
+| Stock Agent | #stock-analyst-agent | 美股分析 | `minneru` |
 
-## Agent记忆系统
+## 当前可用能力（Capability Registry）
 
-每个Agent拥有独立的长期记忆，存储在Redis中：
-
-    agent_memory:email   → Email Agent 的记忆
-    agent_memory:stock   → Stock Agent 的记忆
-
-Agent会在对话中自动存取记忆（通过 `save_memory` / `recall_memory` / `forget_memory` 工具）。记忆会注入到每次对话的系统提示中，实现跨会话的上下文保持。
-
-查看某个Agent的记忆：
-
-    docker exec clawdbot_redis redis-cli get agent_memory:email
-
-查看所有Agent的记忆key：
-
-    docker exec clawdbot_redis redis-cli keys "agent_memory:*"
-
-清除某个Agent的记忆：
-
-    docker exec clawdbot_redis redis-cli del agent_memory:email
-
-## 能力系统（Capability Registry）
-
-工具、API、数据库等外部能力统一定义在 `shared/capabilities/` 目录里，每个 Agent 通过 `AGENT_CAPABILITIES` 环境变量声明自己能用哪些。
-
-### 当前可用能力
+工具、API、数据库等外部能力统一定义在 `shared/capabilities/`，按需分配给各 Agent。
 
 | 能力名 | 功能 | 所需环境变量 |
 |---|---|---|
+| `email` | Yahoo邮箱 IMAP/SMTP（读取、搜索、发送、管理） | `EMAIL_ADDRESS`, `EMAIL_APP_PASSWORD`, `IMAP_HOST`, `IMAP_PORT`, `SMTP_HOST`, `SMTP_PORT` |
 | `minneru` | PDF → Markdown（RunPod Serverless） | `RUNPOD_API_KEY`, `MINNERU_ENDPOINT_ID` |
-| `database` | 远程数据库只读查询（需自行接入驱动） | `DATABASE_URL` |
+| `database` | 远程数据库只读查询 | `DATABASE_URL` |
 
-### 为 Agent 分配能力
-
-只需在 `docker-compose.yml` 对应 service 的 `environment` 块里配置：
-
-    agent_email:
-      environment:
-        AGENT_CAPABILITIES: minneru,database   # 逗号分隔，留空则无外部能力
-
-Agent 重启后自动加载，无需修改任何 Python 代码。
-
-### 添加新能力
-
-1. 在 `shared/capabilities/` 新建文件（参考 `minneru.py`），继承 `Capability` 基类
-2. 在 `shared/capabilities/registry.py` 的 `REGISTRY` 里加一行
-3. 在需要的 Agent 的 `AGENT_CAPABILITIES` 里加上这个名字
-4. 重启对应 Agent 容器
-
-## 环境要求
-
-- Ubuntu 20.04+
-- Docker 20+
-- docker-compose 1.29+
-- Node.js 18+（用于Codex CLI）
-- ChatGPT Plus/Pro账号（用于Codex CLI登录）
+---
 
 ## 部署步骤
 
@@ -95,14 +102,13 @@ Agent 重启后自动加载，无需修改任何 Python 代码。
     cp .env.example .env
     nano .env
 
-需要填写：
-- SLACK_BOT_TOKEN
-- SLACK_APP_TOKEN
-- SLACK_SIGNING_SECRET
+必填：
+- `SLACK_BOT_TOKEN`、`SLACK_APP_TOKEN`、`SLACK_SIGNING_SECRET`
+
+邮箱能力（如需）：
+- `EMAIL_ADDRESS`、`EMAIL_APP_PASSWORD`（Yahoo应用专用密码）
 
 ### 4. 在Slack创建频道并邀请Bot
-
-在每个Agent频道里执行：
 
     /invite @ClawdBot
 
@@ -110,28 +116,25 @@ Agent 重启后自动加载，无需修改任何 Python 代码。
 
     docker-compose up -d --build
 
-### 6. 验证运行
+### 6. 验证
+
+    docker-compose ps        # 所有服务状态应为 Up
+    docker-compose logs -f agent_email
+
+---
+
+## 日常维护
+
+查看容器状态：
 
     docker-compose ps
 
-所有服务状态应该是 Up。
-
-## 日常维护命令
-
-查看所有容器状态：
-
-    docker-compose ps
-
-查看某个Agent日志：
+查看日志：
 
     docker-compose logs -f agent_email
     docker-compose logs -f agent_stock
 
-重启所有服务：
-
-    docker-compose restart
-
-重启某个Agent：
+重启单个Agent：
 
     docker-compose restart agent_email
 
@@ -141,6 +144,8 @@ Agent 重启后自动加载，无需修改任何 Python 代码。
     docker-compose down
     docker-compose up -d --build
 
+---
+
 ## 添加新Agent
 
 ### 第一步：创建Agent目录
@@ -149,146 +154,142 @@ Agent 重启后自动加载，无需修改任何 Python 代码。
 
 ### 第二步：修改 agents/myagent/agent.py
 
-把 SYSTEM_PROMPTS 里加入新Agent的角色描述：
+在 `SYSTEM_PROMPTS` 里加入新Agent的角色描述：
 
-    SYSTEM_PROMPTS = {
-        "email": "You are an AI email assistant...",
-        "stock": "You are a US stock market analyst...",
-        "myagent": "你对新Agent的描述",
-    }
+```python
+SYSTEM_PROMPTS = {
+    "email": "...",
+    "stock": "...",
+    "myagent": "你对新Agent的描述",
+}
+```
 
 ### 第三步：在 docker-compose.yml 添加新服务
 
-在 services 末尾加入：
+```yaml
+agent_myagent:
+  build:
+    context: ./agents/myagent
+    dockerfile: Dockerfile
+  container_name: clawdbot_agent_myagent
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    AGENT_ID: myagent
+    AGENT_NAME: "My Agent"
+    SLACK_CHANNEL_NAME: my-agent-channel
+    REDIS_URL: redis://redis:6379
+    AGENT_CAPABILITIES: minneru   # 留空则无外部能力
+  depends_on:
+    - redis
+  networks:
+    - clawdbot_net
+  volumes:
+    - ~/.codex:/root/.codex:ro
+    - ./agents/myagent:/app
+    - ./shared:/shared
+```
 
-    agent_myagent:
-      build:
-        context: ./agents/myagent
-        dockerfile: Dockerfile
-      container_name: clawdbot_agent_myagent
-      restart: unless-stopped
-      env_file: .env
-      environment:
-        AGENT_ID: myagent
-        AGENT_NAME: "My Agent"
-        SLACK_CHANNEL_NAME: my-agent-channel
-        REDIS_URL: redis://redis:6379
-        CODEX_MODEL: gpt-5-codex
-        AGENT_CAPABILITIES: minneru   # 留空则无外部能力
-      depends_on:
-        - redis
-      networks:
-        - clawdbot_net
-      volumes:
-        - ~/.codex:/root/.codex:ro
-        - ./agents/myagent:/app
-        - ./shared:/shared
+> 无需创建任何本地目录。记忆自动存入 Redis（`agent_memory:myagent`），能力通过环境变量按需分配。
 
-> 注意：无需为新Agent创建任何本地目录或额外挂载volume。记忆自动存入Redis，能力通过 `AGENT_CAPABILITIES` 按需分配。
+### 第四步：在Slack创建频道
 
-### 第四步：在 .env 添加频道名
-
-    SLACK_CHANNEL_MYAGENT=my-agent-channel
-
-### 第五步：在Slack创建频道
-
-创建 #my-agent-channel，然后执行：
+创建 `#my-agent-channel`，然后执行：
 
     /invite @ClawdBot
 
-### 第六步：启动新Agent
+### 第五步：启动新Agent
 
     docker-compose up -d --build agent_myagent
 
-## 删除Agent
+---
 
-### 第一步：停止并删除容器
+## 添加新能力
+
+1. 在 `shared/capabilities/` 新建文件，继承 `Capability` 基类（参考 `minneru.py`）
+2. 在 `shared/capabilities/registry.py` 的 `REGISTRY` 里加一行（字符串形式，懒加载）
+3. 在需要的 Agent 的 `AGENT_CAPABILITIES` 里加上这个名字
+4. 重启对应 Agent 容器
+
+---
+
+## 删除Agent
 
     docker-compose stop agent_email
     docker-compose rm -f agent_email
-
-### 第二步：删除代码目录
-
     rm -rf agents/email
+    # 在 docker-compose.yml 中删除对应 service 块
 
-### 第三步：从 docker-compose.yml 删除对应的 service 块
-
-用编辑器打开并删除对应段落：
-
-    nano docker-compose.yml
-
-### 第四步（可选）：清除该Agent的记忆
+可选：清除该Agent的记忆：
 
     docker exec clawdbot_redis redis-cli del agent_memory:email
 
-### 第五步：在Slack删除或存档对应频道
+---
+
+## Agent记忆管理
+
+查看某个Agent的记忆：
+
+    docker exec clawdbot_redis redis-cli get agent_memory:email
+
+查看所有Agent的记忆key：
+
+    docker exec clawdbot_redis redis-cli keys "agent_memory:*"
+
+清除某个Agent的记忆：
+
+    docker exec clawdbot_redis redis-cli del agent_memory:email
+
+---
 
 ## 服务器宕机恢复
 
-### 情况一：服务器重启后自动恢复
+### 服务器重启后自动恢复
 
-所有容器已设置 restart: unless-stopped，服务器重启后Docker会自动重启容器。
+所有容器已设置 `restart: unless-stopped`，服务器重启后Docker会自动重启容器。
 
-验证：
+### 容器崩溃
 
-    docker-compose ps
+    docker-compose ps                          # 查看哪个容器有问题
+    docker-compose logs --tail=50 agent_email  # 查看错误日志
+    docker-compose restart agent_email         # 重启
 
-### 情况二：容器崩溃
-
-查看哪个容器有问题：
-
-    docker-compose ps
-
-查看错误日志：
-
-    docker-compose logs --tail=50 agent_email
-
-重启出问题的容器：
-
-    docker-compose restart agent_email
-
-### 情况三：全部重启
+### 全部重启
 
     cd ~/clawdbot-multi
     docker-compose down
     docker-compose up -d
 
-### 情况四：Codex登录过期
+### Codex登录过期
 
-如果Agent回复"authentication failed"或无响应：
+如果Agent无响应或返回认证错误：
 
     codex login
-
-重新登录后重启Agent：
-
     docker-compose restart agent_email agent_stock
 
-### 情况五：Redis数据问题
+### Redis数据问题
 
 Redis已开启AOF持久化（`--appendonly yes`），重启后记忆数据不会丢失。
-
-如果Redis无法启动：
 
     docker-compose logs redis
     docker-compose up -d redis
 
-> 警告：执行 `docker volume rm clawdbot_redis_data` 会永久删除所有Agent的记忆，请谨慎操作。
+> 警告：`docker volume rm clawdbot_redis_data` 会永久删除所有Agent的记忆，请谨慎操作。
 
-### 情况六：完全重新部署
-
-    cd ~/clawdbot-multi
-    docker-compose down
-    docker rmi clawdbot_slack_gateway clawdbot_agent_email clawdbot_agent_stock
-    docker-compose up -d --build
+---
 
 ## 环境变量说明
 
 | 变量 | 说明 |
 |---|---|
-| SLACK_BOT_TOKEN | Slack Bot Token（xoxb-开头） |
-| SLACK_APP_TOKEN | Slack App Token（xapp-开头） |
-| SLACK_SIGNING_SECRET | Slack签名密钥 |
-| SLACK_CHANNEL_EMAIL | Email Agent的Slack频道名 |
-| SLACK_CHANNEL_STOCK | Stock Agent的Slack频道名 |
-| CODEX_MODEL | 使用的Codex模型（默认gpt-5-codex） |
-| REDIS_URL | Redis连接地址 |
+| `SLACK_BOT_TOKEN` | Slack Bot Token（xoxb-开头） |
+| `SLACK_APP_TOKEN` | Slack App Token（xapp-开头） |
+| `SLACK_SIGNING_SECRET` | Slack签名密钥 |
+| `REDIS_URL` | Redis连接地址（容器内默认 redis://redis:6379） |
+| `EMAIL_ADDRESS` | Yahoo邮箱地址 |
+| `EMAIL_APP_PASSWORD` | Yahoo应用专用密码 |
+| `IMAP_HOST` / `IMAP_PORT` | Yahoo IMAP服务器（imap.mail.yahoo.com / 993） |
+| `SMTP_HOST` / `SMTP_PORT` | Yahoo SMTP服务器（smtp.mail.yahoo.com / 587） |
+| `RUNPOD_API_KEY` | RunPod API密钥（minneru能力） |
+| `MINNERU_ENDPOINT_ID` | RunPod Serverless端点ID（minneru能力） |
+| `DATABASE_URL` | 远程数据库连接字符串（database能力） |

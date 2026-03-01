@@ -52,7 +52,7 @@ class BaseAgent(ABC):
         self.model: str = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
         self.max_tokens: int = int(os.environ.get("MAX_TOKENS", "4096"))
 
-        self.claude = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self._claude: anthropic.AsyncAnthropic | None = None
         self.log = logging.getLogger(self.agent_name)
 
         # In-memory cache; loaded from Redis at the start of run()
@@ -163,6 +163,9 @@ class BaseAgent(ABC):
         """
         # Inject memory context into system prompt
         system = self.system_prompt + self.get_memory_context()
+
+        if self._claude is None:
+            self._claude = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
         kwargs = dict(
             model=self.model,

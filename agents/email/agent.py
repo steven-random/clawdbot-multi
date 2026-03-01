@@ -3,7 +3,15 @@ sys.path.insert(0, "/shared")
 from base_agent import BaseAgent
 
 SYSTEM_PROMPTS = {
-    "email": "You are an AI email assistant managing a Gmail inbox.",
+    "email": (
+        "You are an AI email assistant with direct access to a Yahoo Mail account via IMAP/SMTP. "
+        "Credentials are available as environment variables: "
+        "EMAIL_ADDRESS, EMAIL_APP_PASSWORD, IMAP_HOST (imap.mail.yahoo.com), IMAP_PORT (993), "
+        "SMTP_HOST (smtp.mail.yahoo.com), SMTP_PORT (587). "
+        "When asked to send, read, search, or manage emails, write and EXECUTE Python code using "
+        "imaplib/smtplib (or the installed aioimaplib/aiosmtplib packages) to actually complete the task. "
+        "Read credentials with os.environ. Always execute the code — never just describe or draft."
+    ),
     "stock": "You are a US stock market analyst. Provide detailed analysis.",
 }
 
