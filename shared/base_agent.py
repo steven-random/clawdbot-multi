@@ -6,14 +6,20 @@ Handles: Redis pub/sub, Claude API calls, response posting back via Redis.
 """
 
 import os
+import sys
 import json
 import asyncio
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 
+# Ensure /shared is in path so the capabilities package is importable
+if "/shared" not in sys.path:
+    sys.path.insert(0, "/shared")
+
 import redis.asyncio as aioredis
 import anthropic
+from capabilities.registry import load as load_capabilities
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +37,11 @@ class BaseAgent(ABC):
     Memory:
       Each agent has isolated long-term memory stored in Redis under the key
       f"agent_memory:{agent_id}". No local files or extra volume mounts needed.
+
+    Capabilities:
+      Set AGENT_CAPABILITIES=minneru,database (comma-separated) in docker-compose.yml.
+      All available capabilities are registered in shared/capabilities/registry.py.
+      Capabilities are auto-loaded at startup; no agent code changes required.
     """
 
     def __init__(self):
@@ -47,6 +58,9 @@ class BaseAgent(ABC):
         # In-memory cache; loaded from Redis at the start of run()
         self.memory: dict = {"entries": [], "updated_at": None}
         self._redis: aioredis.Redis | None = None
+
+        # Capabilities loaded from AGENT_CAPABILITIES env var in run()
+        self._capabilities: list = []
 
     # ── Memory management ──────────────────────────────────
 
@@ -117,9 +131,13 @@ class BaseAgent(ABC):
     def system_prompt(self) -> str:
         """Return the system prompt for this agent."""
 
-    @abstractmethod
     async def get_tools(self) -> list[dict]:
-        """Return Anthropic-format tool definitions for this agent."""
+        """
+        Return Anthropic-format tool definitions for this agent.
+        By default returns the definitions from loaded capabilities.
+        Override in subclass to add agent-specific tools on top.
+        """
+        return [cap.DEFINITION for cap in self._capabilities]
 
     async def pre_process(self, task: dict) -> dict:
         """Optional hook: enrich/validate task before sending to Claude."""
@@ -183,7 +201,18 @@ class BaseAgent(ABC):
         return "\n".join(full_text)
 
     async def handle_tool_call(self, name: str, input_: dict) -> str:
-        """Override in subclass to handle tool calls. Built-in memory tools are handled here."""
+        """
+        Dispatch a tool call. Resolution order:
+          1. Loaded capabilities (from AGENT_CAPABILITIES)
+          2. Built-in memory tools (save_memory, recall_memory, forget_memory)
+          3. Subclass overrides (call super() to reach this fallback)
+        """
+        # 1. Try capabilities
+        for cap in self._capabilities:
+            if cap.DEFINITION["name"] == name:
+                return await cap.run(input_)
+
+        # 2. Built-in memory tools
         if name == "save_memory":
             await self.remember(input_["content"], input_.get("category", "general"))
             return "Memory saved."
@@ -267,6 +296,15 @@ class BaseAgent(ABC):
 
         # Load this agent's memory from Redis
         await self._load_memory()
+
+        # Load capabilities declared in AGENT_CAPABILITIES env var
+        caps_env = os.environ.get("AGENT_CAPABILITIES", "")
+        self._capabilities = load_capabilities(caps_env.split(",") if caps_env else [])
+        for cap in self._capabilities:
+            await cap.setup()
+        if self._capabilities:
+            names = ", ".join(cap.NAME for cap in self._capabilities)
+            self.log.info(f"Active capabilities: {names}")
 
         async with self._redis.pubsub() as ps:
             await ps.subscribe(f"tasks:{self.agent_id}")

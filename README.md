@@ -42,6 +42,34 @@ Agent会在对话中自动存取记忆（通过 `save_memory` / `recall_memory` 
 
     docker exec clawdbot_redis redis-cli del agent_memory:email
 
+## 能力系统（Capability Registry）
+
+工具、API、数据库等外部能力统一定义在 `shared/capabilities/` 目录里，每个 Agent 通过 `AGENT_CAPABILITIES` 环境变量声明自己能用哪些。
+
+### 当前可用能力
+
+| 能力名 | 功能 | 所需环境变量 |
+|---|---|---|
+| `minneru` | PDF → Markdown（RunPod Serverless） | `RUNPOD_API_KEY`, `MINNERU_ENDPOINT_ID` |
+| `database` | 远程数据库只读查询（需自行接入驱动） | `DATABASE_URL` |
+
+### 为 Agent 分配能力
+
+只需在 `docker-compose.yml` 对应 service 的 `environment` 块里配置：
+
+    agent_email:
+      environment:
+        AGENT_CAPABILITIES: minneru,database   # 逗号分隔，留空则无外部能力
+
+Agent 重启后自动加载，无需修改任何 Python 代码。
+
+### 添加新能力
+
+1. 在 `shared/capabilities/` 新建文件（参考 `minneru.py`），继承 `Capability` 基类
+2. 在 `shared/capabilities/registry.py` 的 `REGISTRY` 里加一行
+3. 在需要的 Agent 的 `AGENT_CAPABILITIES` 里加上这个名字
+4. 重启对应 Agent 容器
+
 ## 环境要求
 
 - Ubuntu 20.04+
@@ -146,6 +174,7 @@ Agent会在对话中自动存取记忆（通过 `save_memory` / `recall_memory` 
         SLACK_CHANNEL_NAME: my-agent-channel
         REDIS_URL: redis://redis:6379
         CODEX_MODEL: gpt-5-codex
+        AGENT_CAPABILITIES: minneru   # 留空则无外部能力
       depends_on:
         - redis
       networks:
@@ -155,7 +184,7 @@ Agent会在对话中自动存取记忆（通过 `save_memory` / `recall_memory` 
         - ./agents/myagent:/app
         - ./shared:/shared
 
-> 注意：无需为新Agent创建任何本地目录或额外挂载volume，记忆会自动存入Redis。
+> 注意：无需为新Agent创建任何本地目录或额外挂载volume。记忆自动存入Redis，能力通过 `AGENT_CAPABILITIES` 按需分配。
 
 ### 第四步：在 .env 添加频道名
 

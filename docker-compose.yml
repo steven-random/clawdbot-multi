@@ -47,6 +47,7 @@ services:
       AGENT_NAME: "Email Agent"
       SLACK_CHANNEL_NAME: email-agent
       REDIS_URL: redis://redis:6379
+      AGENT_CAPABILITIES: minneru   # comma-separated: minneru,database,...
     depends_on:
       - redis
     networks:
@@ -68,6 +69,7 @@ services:
       AGENT_NAME: "Stock Analyst Agent"
       SLACK_CHANNEL_NAME: stock-analyst-agent
       REDIS_URL: redis://redis:6379
+      AGENT_CAPABILITIES: minneru   # comma-separated: minneru,database,...
     depends_on:
       - redis
     networks:
